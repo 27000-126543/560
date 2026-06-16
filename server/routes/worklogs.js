@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
-const { successResponse, errorResponse, validateWorkHours } = require('../utils/helpers');
+const { successResponse, errorResponse, validateWorkHours, addActivity, addNotification } = require('../utils/helpers');
 const { authMiddleware, roleMiddleware } = require('../middleware/auth');
 const { workLogValidation, rejectValidation } = require('../middleware/validation');
 
@@ -158,6 +158,70 @@ router.get('/my-logs', async (req, res) => {
   }
 });
 
+router.get('/calendar', async (req, res) => {
+  try {
+    const { month, user_id = '' } = req.query;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    if (!month) {
+      return errorResponse(res, '请提供月份参数，格式：YYYY-MM');
+    }
+
+    const yearMonth = month.split('-');
+    if (yearMonth.length !== 2) {
+      return errorResponse(res, '月份格式错误，请使用 YYYY-MM 格式');
+    }
+
+    const startDate = `${month}-01`;
+    const endDate = new Date(yearMonth[0], yearMonth[1], 0).toISOString().split('T')[0];
+
+    let sql = `SELECT 
+                 wl.work_date,
+                 COALESCE(SUM(wl.hours), 0) as total_hours,
+                 COALESCE(SUM(CASE WHEN wl.status = 'approved' THEN wl.hours ELSE 0 END), 0) as approved_hours,
+                 COALESCE(SUM(CASE WHEN wl.status = 'submitted' THEN wl.hours ELSE 0 END), 0) as submitted_hours,
+                 COALESCE(SUM(CASE WHEN wl.status = 'rejected' THEN 1 ELSE 0 END), 0) as rejected_count,
+                 COUNT(wl.id) as log_count
+               FROM work_logs wl
+               LEFT JOIN tasks t ON wl.task_id = t.id
+               LEFT JOIN projects p ON t.project_id = p.id
+               WHERE wl.work_date >= ? AND wl.work_date <= ?`;
+    const params = [startDate, endDate];
+
+    if (user_id && (userRole === 'admin' || userRole === 'manager')) {
+      sql += ' AND wl.user_id = ?';
+      params.push(user_id);
+    } else if (userRole === 'member') {
+      sql += ' AND wl.user_id = ?';
+      params.push(userId);
+    } else if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    }
+
+    sql += ' GROUP BY wl.work_date ORDER BY wl.work_date ASC';
+
+    const [rows] = await pool.execute(sql, params);
+
+    const result = {};
+    rows.forEach(row => {
+      result[row.work_date] = {
+        total_hours: parseFloat(row.total_hours),
+        approved_hours: parseFloat(row.approved_hours),
+        submitted_hours: parseFloat(row.submitted_hours),
+        rejected_count: parseInt(row.rejected_count),
+        log_count: parseInt(row.log_count)
+      };
+    });
+
+    successResponse(res, result);
+  } catch (err) {
+    console.error('获取日历工时统计错误:', err);
+    errorResponse(res, '获取日历数据失败', 500);
+  }
+});
+
 router.get('/:id', async (req, res) => {
   try {
     const userId = req.user.id;
@@ -203,7 +267,12 @@ router.post('/', workLogValidation, async (req, res) => {
       return errorResponse(res, validation.message);
     }
 
-    const [tasks] = await pool.execute('SELECT * FROM tasks WHERE id = ?', [task_id]);
+    const [tasks] = await pool.execute(`
+      SELECT t.*, p.manager_id 
+      FROM tasks t 
+      LEFT JOIN projects p ON t.project_id = p.id 
+      WHERE t.id = ?
+    `, [task_id]);
     if (tasks.length === 0) {
       return errorResponse(res, '任务不存在');
     }
@@ -232,7 +301,20 @@ router.post('/', workLogValidation, async (req, res) => {
       [hours, task_id]
     );
 
-    successResponse(res, { id: result.insertId }, '工时记录提交成功');
+    const workLogId = result.insertId;
+    
+    addActivity(task_id, userId, 'worklog_submit', `提交了工时记录：${hours}小时，${log_content || '无描述'}`, {
+      work_log_id: workLogId,
+      hours: hours,
+      work_date: work_date
+    });
+    
+    const task = tasks[0];
+    if (task.manager_id && task.manager_id !== userId) {
+      addNotification(task.manager_id, 'worklog_submit', '工时提交待审核', `成员提交了工时：${hours}小时，任务「${task.name}」`, workLogId, 'worklog');
+    }
+
+    successResponse(res, { id: workLogId }, '工时记录提交成功');
   } catch (err) {
     console.error('提交工时记录错误:', err);
     errorResponse(res, '提交工时记录失败', 500);
@@ -326,6 +408,31 @@ router.put('/:id', async (req, res) => {
         logId
       ]
     );
+    
+    const finalHours = hours !== undefined ? parseFloat(hours) : oldHours;
+    const finalDate = work_date || log.work_date;
+    const finalContent = log_content !== undefined ? log_content : log.log_content;
+    
+    const activityText = wasRejected ? '重新提交了工时记录' : '更新了工时记录';
+    addActivity(log.task_id, userId, 'worklog_submit', `${activityText}：${finalHours}小时，${finalContent || '无描述'}`, {
+      work_log_id: logId,
+      hours: finalHours,
+      work_date: finalDate
+    });
+    
+    if (wasRejected) {
+      const [taskInfo] = await pool.execute(`
+        SELECT t.*, p.manager_id 
+        FROM tasks t 
+        LEFT JOIN projects p ON t.project_id = p.id 
+        WHERE t.id = ?
+      `, [log.task_id]);
+      
+      if (taskInfo.length > 0 && taskInfo[0].manager_id && taskInfo[0].manager_id !== userId) {
+        addNotification(taskInfo[0].manager_id, 'worklog_submit', '工时提交待审核', 
+          `成员重新提交了工时：${finalHours}小时，任务「${taskInfo[0].name}」`, logId, 'worklog');
+      }
+    }
 
     successResponse(res, null, '工时记录更新成功');
   } catch (err) {
@@ -381,7 +488,7 @@ router.post('/:id/approve', roleMiddleware('admin', 'manager'), async (req, res)
     const userId = req.user.id;
     const userRole = req.user.role;
 
-    let sql = `SELECT wl.id, wl.status 
+    let sql = `SELECT wl.*, t.name as task_name 
                FROM work_logs wl 
                LEFT JOIN tasks t ON wl.task_id = t.id 
                LEFT JOIN projects p ON t.project_id = p.id 
@@ -401,11 +508,21 @@ router.post('/:id/approve', roleMiddleware('admin', 'manager'), async (req, res)
     if (workLogs[0].status !== 'submitted') {
       return errorResponse(res, '该工时记录状态不是待审核，无法通过');
     }
+    const log = workLogs[0];
 
     await pool.execute(
       "UPDATE work_logs SET status = 'approved' WHERE id = ?",
       [logId]
     );
+    
+    addActivity(log.task_id, userId, 'worklog_approve', `审核通过了工时记录：${log.hours}小时`, {
+      work_log_id: logId,
+      hours: log.hours
+    });
+    
+    if (log.user_id !== userId) {
+      addNotification(log.user_id, 'worklog_approve', '工时审核通过', `您的工时记录（${log.hours}小时，任务「${log.task_name}」）已审核通过`, logId, 'worklog');
+    }
 
     successResponse(res, null, '工时记录审核通过');
   } catch (err) {
@@ -421,7 +538,7 @@ router.post('/:id/reject', roleMiddleware('admin', 'manager'), rejectValidation,
     const userId = req.user.id;
     const userRole = req.user.role;
 
-    let sql = `SELECT wl.* 
+    let sql = `SELECT wl.*, t.name as task_name 
                FROM work_logs wl 
                LEFT JOIN tasks t ON wl.task_id = t.id 
                LEFT JOIN projects p ON t.project_id = p.id 
@@ -454,6 +571,16 @@ router.post('/:id/reject', roleMiddleware('admin', 'manager'), rejectValidation,
         'UPDATE tasks SET actual_hours = GREATEST(0, COALESCE(actual_hours, 0) - ?) WHERE id = ?',
         [log.hours, log.task_id]
       );
+    }
+    
+    addActivity(log.task_id, userId, 'worklog_reject', `驳回了工时记录：${log.hours}小时，原因：${reject_reason}`, {
+      work_log_id: logId,
+      hours: log.hours,
+      reject_reason
+    });
+    
+    if (log.user_id !== userId) {
+      addNotification(log.user_id, 'worklog_reject', '工时被驳回', `您的工时记录（${log.hours}小时，任务「${log.task_name}」）被驳回，原因：${reject_reason}`, logId, 'worklog');
     }
 
     successResponse(res, null, '工时记录已驳回');

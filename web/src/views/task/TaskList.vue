@@ -225,7 +225,8 @@
     <el-dialog
       v-model="detailDialogVisible"
       title="任务详情"
-      width="600px"
+      width="760px"
+      class="task-detail-dialog"
     >
       <div class="task-detail" v-if="taskDetail">
         <div class="detail-header">
@@ -276,6 +277,78 @@
             </el-table-column>
           </el-table>
         </div>
+        
+        <div class="detail-section">
+          <div class="section-header">
+            <h4>动态与评论</h4>
+          </div>
+          
+          <div class="comment-input-wrapper">
+            <el-input
+              v-model="commentContent"
+              type="textarea"
+              :rows="3"
+              placeholder="输入评论，支持@项目成员..."
+              maxlength="500"
+              show-word-limit
+            />
+            <div class="comment-actions">
+              <el-select
+                v-model="mentionedUserIds"
+                multiple
+                filterable
+                placeholder="@成员"
+                size="small"
+                style="width: 200px;"
+              >
+                <el-option
+                  v-for="member in projectMembers"
+                  :key="member.id"
+                  :label="member.name"
+                  :value="member.id"
+                />
+              </el-select>
+              <el-button
+                type="primary"
+                size="small"
+                :loading="commentSubmitting"
+                :disabled="!commentContent.trim()"
+                @click="handleSubmitComment"
+              >
+                发表评论
+              </el-button>
+            </div>
+          </div>
+          
+          <div class="timeline-wrapper">
+            <el-timeline v-loading="activitiesLoading">
+              <el-timeline-item
+                v-for="activity in activities"
+                :key="activity.id"
+                :timestamp="formatDateTime(activity.created_at)"
+                :type="activityType(activity.type)"
+                :icon="activityIcon(activity.type)"
+              >
+                <div class="timeline-item-header">
+                  <el-avatar :size="28" :src="activity.avatar">
+                    {{ activity.user_name?.charAt(0) }}
+                  </el-avatar>
+                  <span class="user-name">{{ activity.user_name }}</span>
+                  <span class="activity-type-tag">{{ activityTypeLabel(activity.type) }}</span>
+                </div>
+                <div class="timeline-item-content">
+                  <p v-if="activity.type === 'comment'" class="comment-text">
+                    {{ activity.content }}
+                  </p>
+                  <p v-else>{{ activity.content }}</p>
+                </div>
+              </el-timeline-item>
+            </el-timeline>
+            <div v-if="activities.length === 0 && !activitiesLoading" class="empty-text">
+              暂无动态
+            </div>
+          </div>
+        </div>
       </div>
     </el-dialog>
   </div>
@@ -284,15 +357,18 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Search, Refresh } from '@element-plus/icons-vue'
+import { Plus, Search, Refresh, ChatDotRound, Clock, Edit, Warning, Check, Close } from '@element-plus/icons-vue'
+import dayjs from 'dayjs'
 import {
   getTaskListApi,
   getTaskDetailApi,
   createTaskApi,
   updateTaskApi,
-  rejectTaskApi
+  rejectTaskApi,
+  getTaskActivitiesApi,
+  addTaskCommentApi
 } from '@/api/task'
-import { getAllProjectsApi } from '@/api/project'
+import { getAllProjectsApi, getProjectDetailApi } from '@/api/project'
 import { getMembersApi } from '@/api/user'
 import {
   statusMap,
@@ -313,6 +389,13 @@ const projectList = ref([])
 const memberList = ref([])
 const taskDetail = ref(null)
 const currentTaskId = ref(null)
+
+const activities = ref([])
+const activitiesLoading = ref(false)
+const commentContent = ref('')
+const commentSubmitting = ref(false)
+const mentionedUserIds = ref([])
+const projectMembers = ref([])
 
 const searchForm = reactive({
   keyword: '',
@@ -460,10 +543,100 @@ const handleEdit = (row) => {
 const handleView = async (row) => {
   try {
     taskDetail.value = await getTaskDetailApi(row.id)
+    currentTaskId.value = row.id
     detailDialogVisible.value = true
+    commentContent.value = ''
+    mentionedUserIds.value = []
+    loadActivities(row.id)
+    loadProjectMembers(taskDetail.value.project_id)
   } catch (err) {
     console.error('获取任务详情失败:', err)
   }
+}
+
+const loadActivities = async (taskId) => {
+  activitiesLoading.value = true
+  try {
+    activities.value = await getTaskActivitiesApi(taskId)
+  } catch (err) {
+    console.error('获取活动记录失败:', err)
+  } finally {
+    activitiesLoading.value = false
+  }
+}
+
+const loadProjectMembers = async (projectId) => {
+  if (!projectId) {
+    projectMembers.value = []
+    return
+  }
+  try {
+    const detail = await getProjectDetailApi(projectId)
+    projectMembers.value = detail.members || []
+  } catch (err) {
+    console.error('获取项目成员失败:', err)
+  }
+}
+
+const handleSubmitComment = async () => {
+  if (!commentContent.value.trim()) return
+  commentSubmitting.value = true
+  try {
+    const newActivity = await addTaskCommentApi(currentTaskId.value, {
+      content: commentContent.value.trim(),
+      mentioned_user_ids: mentionedUserIds.value
+    })
+    activities.value.unshift(newActivity)
+    commentContent.value = ''
+    mentionedUserIds.value = []
+    ElMessage.success('评论发表成功')
+  } catch (err) {
+    console.error('发表评论失败:', err)
+  } finally {
+    commentSubmitting.value = false
+  }
+}
+
+const activityType = (type) => {
+  const map = {
+    comment: 'primary',
+    create: 'success',
+    update_status: 'warning',
+    assign: 'info',
+    worklog_submit: 'primary',
+    worklog_approve: 'success',
+    worklog_reject: 'danger'
+  }
+  return map[type] || 'info'
+}
+
+const activityTypeLabel = (type) => {
+  const map = {
+    comment: '评论',
+    create: '创建任务',
+    update_status: '状态变更',
+    assign: '分配任务',
+    worklog_submit: '提交工时',
+    worklog_approve: '审核通过',
+    worklog_reject: '审核驳回'
+  }
+  return map[type] || type
+}
+
+const activityIcon = (type) => {
+  const map = {
+    comment: ChatDotRound,
+    create: Edit,
+    update_status: Warning,
+    worklog_submit: Clock,
+    worklog_approve: Check,
+    worklog_reject: Close
+  }
+  return map[type] || null
+}
+
+const formatDateTime = (date) => {
+  return dayjs(date).format('YYYY-MM-DD HH:mm')
 }
 
 const onProjectChange = () => {
@@ -586,6 +759,76 @@ onMounted(() => {
         background: #fef0f0;
         padding: 10px;
         border-radius: 4px;
+      }
+      
+      .section-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+      }
+      
+      .comment-input-wrapper {
+        margin-bottom: 20px;
+        
+        .comment-actions {
+          display: flex;
+          justify-content: flex-end;
+          align-items: center;
+          gap: 10px;
+          margin-top: 10px;
+        }
+      }
+      
+      .timeline-wrapper {
+        max-height: 400px;
+        overflow-y: auto;
+        padding-right: 10px;
+        
+        .timeline-item-header {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          margin-bottom: 8px;
+          
+          .user-name {
+            font-weight: 600;
+            color: #303133;
+            font-size: 14px;
+          }
+          
+          .activity-type-tag {
+            font-size: 12px;
+            color: #909399;
+            background: #f4f4f5;
+            padding: 2px 8px;
+            border-radius: 10px;
+          }
+        }
+        
+        .timeline-item-content {
+          .comment-text {
+            background: #f5f7fa;
+            padding: 10px 12px;
+            border-radius: 6px;
+            display: inline-block;
+            max-width: 100%;
+            word-break: break-word;
+          }
+          
+          p {
+            margin: 0;
+            color: #606266;
+            font-size: 14px;
+          }
+        }
+        
+        .empty-text {
+          text-align: center;
+          color: #909399;
+          padding: 30px 0;
+          font-size: 14px;
+        }
       }
     }
   }

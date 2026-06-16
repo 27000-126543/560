@@ -60,3 +60,11 @@ export const rejectWorkLogApi = (id, rejectReason) => {
     data: { reject_reason: rejectReason }
   })
 }
+
+export const getWorkLogCalendarApi = (params) => {
+  return request({
+    url: '/worklogs/calendar',
+    method: 'get',
+    params
+  })
+}

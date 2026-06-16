@@ -8,6 +8,27 @@
       <el-col :span="24">
         <div class="card-wrapper mb-20">
           <div class="card-header">
+            <h3 class="section-title">工时趋势分析</h3>
+            <div class="header-actions">
+              <el-radio-group v-model="trendDimension" size="small" @change="loadTrendData">
+                <el-radio-button value="user">个人维度</el-radio-button>
+                <el-radio-button value="project">项目维度</el-radio-button>
+              </el-radio-group>
+              <el-radio-group v-model="trendPeriod" size="small" @change="loadTrendData">
+                <el-radio-button value="week">按周</el-radio-button>
+                <el-radio-button value="month">按月</el-radio-button>
+              </el-radio-group>
+            </div>
+          </div>
+          <div ref="trendChartRef" style="height: 360px;"></div>
+        </div>
+      </el-col>
+    </el-row>
+    
+    <el-row :gutter="20">
+      <el-col :span="24">
+        <div class="card-wrapper mb-20">
+          <div class="card-header">
             <h3 class="section-title">成员工时统计</h3>
             <div class="header-actions">
               <el-date-picker
@@ -69,14 +90,82 @@
         </div>
       </el-col>
     </el-row>
+    
+    <el-row :gutter="20" class="mt-20">
+      <el-col :span="24">
+        <div class="card-wrapper">
+          <div class="card-header">
+            <h3 class="section-title risk-title">
+              <el-icon><WarningFilled /></el-icon>
+              超支预警
+            </h3>
+            <el-radio-group v-model="overBudgetType" size="small" @change="loadOverBudget">
+              <el-radio-button value="project">按项目</el-radio-button>
+              <el-radio-button value="task">按任务</el-radio-button>
+            </el-radio-group>
+          </div>
+          
+          <el-table :data="overBudgetData" stripe v-loading="overBudgetLoading">
+            <el-table-column v-if="overBudgetType === 'project'" prop="name" label="项目名称" min-width="200">
+              <template #default="{ row }">
+                <span class="risk-name">{{ row.name }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="overBudgetType === 'task'" prop="name" label="任务名称" min-width="200">
+              <template #default="{ row }">
+                <span class="risk-name">{{ row.name }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="overBudgetType === 'project'" prop="manager_name" label="负责人" width="100" />
+            <el-table-column v-if="overBudgetType === 'task'" prop="project_name" label="所属项目" width="140" />
+            <el-table-column v-if="overBudgetType === 'task'" prop="assignee_name" label="负责人" width="100" />
+            <el-table-column prop="estimated_hours" label="预估工时" width="100">
+              <template #default="{ row }">{{ row.estimated_hours }}h</template>
+            </el-table-column>
+            <el-table-column prop="actual_hours" label="实际工时" width="100">
+              <template #default="{ row }">
+                <span class="over-hours">{{ row.actual_hours }}h</span>
+              </template>
+            </el-table-column>
+            <el-table-column prop="over_hours" label="超支" width="100">
+              <template #default="{ row }">
+                <el-tag type="danger" size="small">+{{ row.over_hours }}h</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="超支比例" width="140">
+              <template #default="{ row }">
+                <div class="over-progress">
+                  <el-progress
+                    :percentage="Math.min(row.over_ratio, 100)"
+                    :stroke-width="8"
+                    color="#F56C6C"
+                  />
+                  <span class="over-ratio">{{ row.over_ratio }}%</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="overBudgetType === 'project'" label="超支任务数" width="100">
+              <template #default="{ row }">{{ row.over_budget_tasks }}个</template>
+            </el-table-column>
+          </el-table>
+          
+          <el-empty v-if="!overBudgetLoading && overBudgetData.length === 0" description="暂无超支项目，表现良好！" />
+        </div>
+      </el-col>
+    </el-row>
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, nextTick, computed } from 'vue'
 import { ElMessage } from 'element-plus'
-import { Download } from '@element-plus/icons-vue'
-import { getUserWorkHoursApi, getProjectProgressApi } from '@/api/report'
+import { Download, WarningFilled } from '@element-plus/icons-vue'
+import { 
+  getUserWorkHoursApi, 
+  getProjectProgressApi, 
+  getWorkTrendApi,
+  getOverBudgetApi
+} from '@/api/report'
 import { exportUserHoursApi } from '@/api/report'
 import dayjs from 'dayjs'
 import * as echarts from 'echarts'
@@ -84,14 +173,22 @@ import * as echarts from 'echarts'
 const hoursChartRef = ref(null)
 const taskPieChartRef = ref(null)
 const projectPieChartRef = ref(null)
+const trendChartRef = ref(null)
 
 let hoursChart = null
 let taskPieChart = null
 let projectPieChart = null
+let trendChart = null
 
 const userHoursData = ref([])
 const projectProgressData = ref([])
 const dateRange = ref([])
+const trendDimension = ref('user')
+const trendPeriod = ref('month')
+const trendData = ref({ categories: [], series: [] })
+const overBudgetData = ref([])
+const overBudgetType = ref('project')
+const overBudgetLoading = ref(false)
 
 const maxHours = computed(() => {
   if (userHoursData.value.length === 0) return 1
@@ -101,6 +198,11 @@ const maxHours = computed(() => {
 const getPercentage = (hours) => {
   return Math.round((parseFloat(hours) / maxHours.value) * 100)
 }
+
+const colors = [
+  '#5470c6', '#91cc75', '#fac858', '#ee6666', '#73c0de',
+  '#3ba272', '#fc8452', '#9a60b4', '#ea7ccc', '#48b8bd'
+]
 
 const loadUserHours = async () => {
   try {
@@ -127,6 +229,89 @@ const loadProjectProgress = async () => {
   } catch (err) {
     console.error('加载项目进度失败:', err)
   }
+}
+
+const loadTrendData = async () => {
+  try {
+    const data = await getWorkTrendApi({
+      dimension: trendDimension.value,
+      period: trendPeriod.value
+    })
+    trendData.value = data
+    nextTick(() => {
+      renderTrendChart()
+    })
+  } catch (err) {
+    console.error('加载趋势数据失败:', err)
+  }
+}
+
+const loadOverBudget = async () => {
+  overBudgetLoading.value = true
+  try {
+    overBudgetData.value = await getOverBudgetApi({ type: overBudgetType.value })
+  } catch (err) {
+    console.error('加载超支数据失败:', err)
+  } finally {
+    overBudgetLoading.value = false
+  }
+}
+
+const renderTrendChart = () => {
+  if (!trendChartRef.value) return
+  
+  if (trendChart) trendChart.dispose()
+  trendChart = echarts.init(trendChartRef.value)
+  
+  const series = trendData.value.series.map((s, idx) => ({
+    name: s.name,
+    type: 'line',
+    smooth: true,
+    data: s.data,
+    itemStyle: { color: colors[idx % colors.length] },
+    lineStyle: { width: 2 },
+    symbol: 'circle',
+    symbolSize: 6
+  }))
+  
+  const option = {
+    tooltip: {
+      trigger: 'axis',
+      formatter: (params) => {
+        let result = params[0].axisValue + '<br/>'
+        params.forEach(p => {
+          result += `${p.marker} ${p.seriesName}: ${p.data}h<br/>`
+        })
+        return result
+      }
+    },
+    legend: {
+      type: 'scroll',
+      bottom: 0,
+      data: trendData.value.series.map(s => s.name)
+    },
+    grid: {
+      left: '3%',
+      right: '4%',
+      bottom: '15%',
+      top: '5%',
+      containLabel: true
+    },
+    xAxis: {
+      type: 'category',
+      boundaryGap: false,
+      data: trendData.value.categories
+    },
+    yAxis: {
+      type: 'value',
+      axisLabel: {
+        formatter: '{value}h'
+      }
+    },
+    series: series
+  }
+  
+  trendChart.setOption(option)
 }
 
 const renderHoursChart = () => {
@@ -304,6 +489,9 @@ onMounted(() => {
   
   loadUserHours()
   loadProjectProgress()
+  loadTrendData()
+  loadOverBudget()
+  
   nextTick(() => {
     renderTaskPieChart()
   })
@@ -312,6 +500,7 @@ onMounted(() => {
     hoursChart?.resize()
     taskPieChart?.resize()
     projectPieChart?.resize()
+    trendChart?.resize()
   })
 })
 </script>
@@ -332,6 +521,17 @@ onMounted(() => {
     margin: 0;
   }
   
+  .risk-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: #F56C6C;
+    
+    .el-icon {
+      font-size: 18px;
+    }
+  }
+  
   .header-actions {
     display: flex;
     gap: 10px;
@@ -345,6 +545,39 @@ onMounted(() => {
   
   .rank-progress {
     width: 100%;
+  }
+  
+  .risk-name {
+    font-weight: 500;
+    color: #303133;
+  }
+  
+  .over-hours {
+    font-weight: 600;
+    color: #F56C6C;
+  }
+  
+  .over-progress {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    
+    :deep(.el-progress) {
+      flex: 1;
+      margin-right: 0;
+    }
+  }
+  
+  .over-ratio {
+    font-size: 12px;
+    color: #F56C6C;
+    font-weight: 500;
+    min-width: 50px;
+    text-align: right;
+  }
+  
+  .mt-20 {
+    margin-top: 20px;
   }
 }
 </style>

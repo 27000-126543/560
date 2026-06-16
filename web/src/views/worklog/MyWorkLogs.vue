@@ -3,7 +3,17 @@
     <div class="page-header">
       <h2 class="page-title">我的工时</h2>
       <div class="header-actions">
-        <el-button type="primary" :icon="Plus" @click="handleAdd">
+        <el-radio-group v-model="viewMode" size="default" class="view-switcher">
+          <el-radio-button value="calendar">
+            <el-icon><Calendar /></el-icon>
+            <span>日历视图</span>
+          </el-radio-button>
+          <el-radio-button value="list">
+            <el-icon><List /></el-icon>
+            <span>列表视图</span>
+          </el-radio-button>
+        </el-radio-group>
+        <el-button type="primary" :icon="Plus" @click="handleAdd()">
           填报工时
         </el-button>
       </div>
@@ -48,7 +58,55 @@
       </el-col>
     </el-row>
     
-    <div class="card-wrapper mb-20">
+    <div v-if="viewMode === 'calendar'" class="card-wrapper calendar-wrapper">
+      <div class="calendar-header">
+        <h3>{{ currentMonthLabel }}</h3>
+        <div class="calendar-legend">
+          <span class="legend-item approved-dot">已通过</span>
+          <span class="legend-item submitted-dot">审核中</span>
+          <span class="legend-item rejected-dot">已驳回</span>
+          <span class="legend-item empty-dot">未填报</span>
+        </div>
+      </div>
+      <el-calendar v-model="currentDate" ref="calendarRef">
+        <template #date-cell="{ data }">
+          <div 
+            class="calendar-cell" 
+            :class="{
+              'is-today': data.isToday,
+              'has-log': calendarData[data.day]?.total_hours > 0,
+              'has-rejected': calendarData[data.day]?.rejected_count > 0,
+              'other-month': data.type !== 'current-month'
+            }"
+            @click="handleDayClick(data.day)"
+          >
+            <div class="cell-date">{{ data.day.split('-').slice(1).join('/') }}</div>
+            <div class="cell-hours" v-if="calendarData[data.day]?.total_hours">
+              {{ calendarData[data.day].total_hours }}h
+            </div>
+            <div class="cell-status" v-if="calendarData[data.day]?.log_count">
+              <span 
+                v-if="calendarData[data.day].rejected_count > 0"
+                class="status-dot rejected"
+                :title="`${calendarData[data.day].rejected_count}条被驳回`"
+              ></span>
+              <span 
+                v-if="calendarData[data.day].submitted_hours > 0"
+                class="status-dot submitted"
+                title="有待审核记录"
+              ></span>
+              <span 
+                v-if="calendarData[data.day].approved_hours > 0 && calendarData[data.day].rejected_count === 0 && calendarData[data.day].submitted_hours === 0"
+                class="status-dot approved"
+                title="已通过"
+              ></span>
+            </div>
+          </div>
+        </template>
+      </el-calendar>
+    </div>
+    
+    <div v-if="viewMode === 'list'" class="card-wrapper mb-20">
       <el-form :inline="true" :model="searchForm">
         <el-form-item label="日期范围">
           <el-date-picker
@@ -69,13 +127,13 @@
           </el-select>
         </el-form-item>
         <el-form-item>
-          <el-button type="primary" :icon="Search" @click="loadData">搜索</el-button>
+          <el-button type="primary" :icon="Search" @click="loadListData">搜索</el-button>
           <el-button :icon="Refresh" @click="handleReset">重置</el-button>
         </el-form-item>
       </el-form>
     </div>
     
-    <div class="card-wrapper">
+    <div v-if="viewMode === 'list'" class="card-wrapper">
       <el-table :data="tableData" stripe v-loading="loading">
         <el-table-column type="index" label="序号" width="60" align="center" />
         <el-table-column prop="work_date" label="日期" width="110" />
@@ -133,6 +191,51 @@
         />
       </div>
     </div>
+    
+    <el-dialog
+      v-model="dayDialogVisible"
+      :title="`${selectedDay} 工时记录`"
+      width="700px"
+    >
+      <div class="day-logs">
+        <div class="day-summary">
+          <el-statistic title="当日总工时" :value="dayStats.total_hours" suffix="小时" />
+          <el-button type="primary" size="small" :icon="Plus" @click="handleAdd(selectedDay)">
+            新增工时
+          </el-button>
+        </div>
+        <el-table :data="dayLogs" size="small" v-loading="dayLoading">
+          <el-table-column prop="project_name" label="项目" width="120" />
+          <el-table-column prop="task_name" label="任务" min-width="150" />
+          <el-table-column prop="hours" label="工时" width="80">
+            <template #default="{ row }">{{ row.hours }}h</template>
+          </el-table-column>
+          <el-table-column prop="log_content" label="工作内容" min-width="200" show-overflow-tooltip />
+          <el-table-column prop="status" label="状态" width="90">
+            <template #default="{ row }">
+              <el-tag :type="statusType(row.status)" size="small">
+                {{ statusLabel(row.status) }}
+              </el-tag>
+            </template>
+          </el-table-column>
+          <el-table-column label="操作" width="120" fixed="right">
+            <template #default="{ row }">
+              <el-button type="primary" link size="small" @click="handleView(row)">详情</el-button>
+              <el-button
+                v-if="row.status === 'rejected'"
+                type="warning"
+                link
+                size="small"
+                @click="handleEdit(row)"
+              >
+                编辑
+              </el-button>
+            </template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-if="!dayLoading && dayLogs.length === 0" description="当天暂无工时记录" />
+      </div>
+    </el-dialog>
     
     <el-dialog
       v-model="dialogVisible"
@@ -226,31 +329,40 @@
 </template>
 
 <script setup>
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Search, Refresh, Plus, Clock, CircleCheck, Timer, Close
+  Search, Refresh, Plus, Clock, CircleCheck, Timer, Close, Calendar, List
 } from '@element-plus/icons-vue'
 import {
   getWorkLogListApi,
   getWorkLogDetailApi,
   createWorkLogApi,
   updateWorkLogApi,
-  deleteWorkLogApi
+  deleteWorkLogApi,
+  getWorkLogCalendarApi
 } from '@/api/worklog'
 import { getMyTasksApi } from '@/api/task'
 import { workLogStatusMap } from '@/utils'
 
 const loading = ref(false)
+const dayLoading = ref(false)
 const submitting = ref(false)
 const dialogVisible = ref(false)
 const detailDialogVisible = ref(false)
+const dayDialogVisible = ref(false)
 const isEdit = ref(false)
 const formRef = ref(null)
+const calendarRef = ref(null)
 const tableData = ref([])
 const myTasks = ref([])
 const logDetail = ref(null)
 const dateRange = ref([])
+const calendarData = ref({})
+const dayLogs = ref([])
+const selectedDay = ref('')
+const viewMode = ref('calendar')
+const currentDate = ref(new Date())
 
 const searchForm = reactive({
   status: ''
@@ -287,6 +399,18 @@ const formRules = {
 
 const dialogTitle = computed(() => isEdit.value ? '编辑工时' : '填报工时')
 
+const currentMonthLabel = computed(() => {
+  const d = currentDate.value
+  return `${d.getFullYear()}年${d.getMonth() + 1}月`
+})
+
+const dayStats = computed(() => {
+  const list = dayLogs.value
+  return {
+    total_hours: list.reduce((sum, item) => sum + parseFloat(item.hours || 0), 0).toFixed(1)
+  }
+})
+
 const stats = computed(() => {
   const list = tableData.value
   const totalHours = list.reduce((sum, item) => sum + parseFloat(item.hours), 0)
@@ -310,7 +434,18 @@ const loadMyTasks = async () => {
   }
 }
 
-const loadData = async () => {
+const loadCalendarData = async () => {
+  try {
+    const d = currentDate.value
+    const month = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`
+    const data = await getWorkLogCalendarApi({ month })
+    calendarData.value = data
+  } catch (err) {
+    console.error('加载日历数据失败:', err)
+  }
+}
+
+const loadListData = async () => {
   loading.value = true
   try {
     const params = {
@@ -334,30 +469,53 @@ const loadData = async () => {
   }
 }
 
+const loadDayLogs = async (day) => {
+  dayLoading.value = true
+  try {
+    const res = await getWorkLogListApi({
+      date_from: day,
+      date_to: day,
+      page_size: 100
+    })
+    dayLogs.value = res.list || []
+  } catch (err) {
+    console.error('加载当日工时失败:', err)
+  } finally {
+    dayLoading.value = false
+  }
+}
+
+const handleDayClick = (day) => {
+  selectedDay.value = day
+  loadDayLogs(day)
+  dayDialogVisible.value = true
+}
+
 const handleReset = () => {
   searchForm.status = ''
   dateRange.value = []
   pagination.page = 1
-  loadData()
+  loadListData()
 }
 
 const handleSizeChange = (size) => {
   pagination.page_size = size
   pagination.page = 1
-  loadData()
+  loadListData()
 }
 
 const handlePageChange = (page) => {
   pagination.page = page
-  loadData()
+  loadListData()
 }
 
-const handleAdd = () => {
+const handleAdd = (day) => {
   isEdit.value = false
+  const workDate = day || new Date().toISOString().split('T')[0]
   Object.assign(formData, {
     id: null,
     task_id: myTasks.value[0]?.id || null,
-    work_date: new Date().toISOString().split('T')[0],
+    work_date: workDate,
     hours: 1,
     log_content: ''
   })
@@ -400,7 +558,11 @@ const handleSubmit = async () => {
           ElMessage.success('提交成功')
         }
         dialogVisible.value = false
-        loadData()
+        if (dayDialogVisible.value && selectedDay.value) {
+          loadDayLogs(selectedDay.value)
+        }
+        loadCalendarData()
+        loadListData()
       } catch (err) {
         console.error('提交失败:', err)
       } finally {
@@ -419,16 +581,34 @@ const handleDelete = (row) => {
     try {
       await deleteWorkLogApi(row.id)
       ElMessage.success('删除成功')
-      loadData()
+      if (dayDialogVisible.value && selectedDay.value) {
+        loadDayLogs(selectedDay.value)
+      }
+      loadCalendarData()
+      loadListData()
     } catch (err) {
       console.error('删除失败:', err)
     }
   }).catch(() => {})
 }
 
+watch(currentDate, () => {
+  if (viewMode.value === 'calendar') {
+    loadCalendarData()
+  }
+})
+
+watch(viewMode, (val) => {
+  if (val === 'calendar') {
+    loadCalendarData()
+  } else {
+    loadListData()
+  }
+})
+
 onMounted(() => {
   loadMyTasks()
-  loadData()
+  loadCalendarData()
 })
 </script>
 
@@ -437,6 +617,139 @@ onMounted(() => {
   .header-actions {
     display: flex;
     gap: 10px;
+    align-items: center;
+  }
+  
+  .view-switcher {
+    margin-right: 10px;
+  }
+  
+  .calendar-wrapper {
+    .calendar-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      
+      h3 {
+        margin: 0;
+        font-size: 18px;
+        color: #303133;
+      }
+      
+      .calendar-legend {
+        display: flex;
+        gap: 16px;
+        font-size: 12px;
+        color: #606266;
+        
+        .legend-item {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          
+          &::before {
+            content: '';
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+          }
+          
+          &.approved-dot::before { background: #67C23A; }
+          &.submitted-dot::before { background: #E6A23C; }
+          &.rejected-dot::before { background: #F56C6C; }
+          &.empty-dot::before { background: #dcdfe6; }
+        }
+      }
+    }
+    
+    :deep(.el-calendar) {
+      --el-calendar-cell-width: auto;
+    }
+    
+    :deep(.el-calendar__body) {
+      padding: 0;
+    }
+    
+    .calendar-cell {
+      padding: 8px;
+      height: 80px;
+      cursor: pointer;
+      border-radius: 4px;
+      transition: background 0.2s;
+      position: relative;
+      
+      &:hover {
+        background: #f5f7fa;
+      }
+      
+      &.is-today {
+        background: #ecf5ff;
+        
+        .cell-date {
+          color: #409EFF;
+          font-weight: 600;
+        }
+      }
+      
+      &.other-month {
+        opacity: 0.3;
+      }
+      
+      &.has-log {
+        .cell-hours {
+          color: #67C23A;
+        }
+      }
+      
+      &.has-rejected {
+        .cell-hours {
+          color: #F56C6C;
+        }
+      }
+      
+      .cell-date {
+        font-size: 13px;
+        color: #606266;
+        margin-bottom: 4px;
+      }
+      
+      .cell-hours {
+        font-size: 18px;
+        font-weight: 600;
+        line-height: 1.2;
+      }
+      
+      .cell-status {
+        position: absolute;
+        bottom: 6px;
+        right: 6px;
+        display: flex;
+        gap: 3px;
+        
+        .status-dot {
+          width: 7px;
+          height: 7px;
+          border-radius: 50%;
+          
+          &.approved { background: #67C23A; }
+          &.submitted { background: #E6A23C; }
+          &.rejected { background: #F56C6C; }
+        }
+      }
+    }
+  }
+  
+  .day-logs {
+    .day-summary {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 16px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #ebeef5;
+    }
   }
   
   .stat-card {

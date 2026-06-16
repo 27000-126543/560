@@ -41,10 +41,41 @@ const getLastWeekRange = () => {
   return getWeekRange(lastWeek.toDate());
 };
 
+const addActivity = async (taskId, userId, type, content = '', extraData = null) => {
+  try {
+    const pool = require('../config/database');
+    const extra = extraData ? JSON.stringify(extraData) : null;
+    await pool.execute(
+      'INSERT INTO task_activities (task_id, user_id, type, content, extra_data) VALUES (?, ?, ?, ?, ?)',
+      [taskId, userId, type, content, extra]
+    );
+    return true;
+  } catch (err) {
+    console.error('插入活动记录失败:', err);
+    return false;
+  }
+};
+
+const addNotification = async (userId, type, title, content = '', relatedId = null, relatedType = '') => {
+  try {
+    const pool = require('../config/database');
+    await pool.execute(
+      'INSERT INTO notifications (user_id, type, title, content, related_id, related_type) VALUES (?, ?, ?, ?, ?, ?)',
+      [userId, type, title, content, relatedId, relatedType]
+    );
+    return true;
+  } catch (err) {
+    console.error('插入通知失败:', err);
+    return false;
+  }
+};
+
 module.exports = {
   successResponse,
   errorResponse,
   validateWorkHours,
   getWeekRange,
-  getLastWeekRange
+  getLastWeekRange,
+  addActivity,
+  addNotification
 };

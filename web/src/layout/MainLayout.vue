@@ -41,6 +41,39 @@
           </div>
           
           <div class="header-right">
+            <el-dropdown trigger="click" @command="handleNotificationCommand">
+              <div class="notification-bell" @click="loadNotifications">
+                <el-badge :value="unreadCount" :hidden="unreadCount === 0" class="notification-badge">
+                  <el-icon class="bell-icon"><Bell /></el-icon>
+                </el-badge>
+              </div>
+              <template #dropdown>
+                <el-dropdown-menu class="notification-dropdown">
+                  <div class="dropdown-header">
+                    <span>通知</span>
+                    <el-link type="primary" :underline="false" @click="goToNotifications">
+                      全部通知
+                    </el-link>
+                  </div>
+                  <el-dropdown-item v-for="item in notificationList" :key="item.id" :command="'view_' + item.id">
+                    <div class="notification-item" :class="{ unread: !item.is_read }">
+                      <div class="notification-title">{{ item.title }}</div>
+                      <div class="notification-content">{{ item.content }}</div>
+                      <div class="notification-time">{{ formatTime(item.created_at) }}</div>
+                    </div>
+                  </el-dropdown-item>
+                  <el-dropdown-item v-if="notificationList.length === 0" disabled>
+                    <div class="empty-notification">暂无通知</div>
+                  </el-dropdown-item>
+                  <div class="dropdown-footer" v-if="unreadCount > 0">
+                    <el-link type="primary" :underline="false" @click="handleMarkAllRead">
+                      全部标为已读
+                    </el-link>
+                  </div>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+            
             <el-dropdown @command="handleCommand">
               <div class="user-info">
                 <el-avatar :size="32" class="user-avatar">
@@ -115,18 +148,20 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
-  Fold, Expand, User, Key, SwitchButton, ArrowDown,
+  Fold, Expand, User, Key, SwitchButton, ArrowDown, Bell,
   Odometer, UserFilled, Folder, List, Checked, Clock,
   EditPen, DataLine, Grid
 } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import { useAppStore } from '@/stores/app'
 import { updatePasswordApi } from '@/api/auth'
+import { getNotificationListApi, getUnreadCountApi, markAllReadApi, markNotificationReadApi } from '@/api/notification'
 import { roleMap } from '@/utils'
+import dayjs from 'dayjs'
 
 const router = useRouter()
 const route = useRoute()
@@ -134,6 +169,63 @@ const userStore = useUserStore()
 const appStore = useAppStore()
 
 const isCollapsed = computed(() => appStore.sidebarCollapsed)
+
+const unreadCount = ref(0)
+const notificationList = ref([])
+
+const loadUnreadCount = async () => {
+  try {
+    const res = await getUnreadCountApi()
+    unreadCount.value = res.unread_count
+  } catch (err) {
+    console.error('获取未读通知数失败:', err)
+  }
+}
+
+const loadNotifications = async () => {
+  try {
+    const res = await getNotificationListApi({ page_size: 5, is_read: 0 })
+    notificationList.value = res.list || []
+  } catch (err) {
+    console.error('获取通知列表失败:', err)
+  }
+}
+
+const goToNotifications = () => {
+  router.push('/notifications')
+}
+
+const handleNotificationCommand = async (command) => {
+  if (command.startsWith('view_')) {
+    const id = parseInt(command.replace('view_', ''))
+    try {
+      await markNotificationReadApi(id)
+      loadUnreadCount()
+    } catch (err) {
+      console.error('标记已读失败:', err)
+    }
+  }
+}
+
+const handleMarkAllRead = async () => {
+  try {
+    await markAllReadApi()
+    unreadCount.value = 0
+    ElMessage.success('已全部标记为已读')
+  } catch (err) {
+    console.error('全部已读失败:', err)
+  }
+}
+
+const formatTime = (date) => {
+  return dayjs(date).format('MM-DD HH:mm')
+}
+
+onMounted(() => {
+  if (userStore.token) {
+    loadUnreadCount()
+  }
+})
 
 const activeMenu = computed(() => route.path)
 const currentRoute = computed(() => route.meta.title || '')
@@ -330,6 +422,83 @@ const handleLogout = () => {
 .header-right {
   display: flex;
   align-items: center;
+  gap: 15px;
+}
+
+.notification-bell {
+  cursor: pointer;
+  padding: 0 10px;
+  
+  .bell-icon {
+    font-size: 20px;
+    color: #606266;
+    
+    &:hover {
+      color: #409EFF;
+    }
+  }
+}
+
+.notification-dropdown {
+  width: 320px;
+  padding: 0;
+  
+  .dropdown-header {
+    padding: 12px 16px;
+    border-bottom: 1px solid #ebeef5;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-weight: 600;
+    color: #303133;
+  }
+  
+  .dropdown-footer {
+    padding: 10px 16px;
+    border-top: 1px solid #ebeef5;
+    text-align: center;
+  }
+  
+  .notification-item {
+    padding: 10px 0;
+    border-bottom: 1px solid #f2f6fc;
+    
+    &:last-child {
+      border-bottom: none;
+    }
+    
+    &.unread {
+      background: #ecf5ff;
+    }
+    
+    .notification-title {
+      font-size: 14px;
+      color: #303133;
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+    
+    .notification-content {
+      font-size: 12px;
+      color: #606266;
+      margin-bottom: 4px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    
+    .notification-time {
+      font-size: 12px;
+      color: #909399;
+    }
+  }
+  
+  .empty-notification {
+    text-align: center;
+    color: #909399;
+    padding: 20px 0;
+    font-size: 14px;
+  }
 }
 
 .user-info {

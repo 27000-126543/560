@@ -9,6 +9,7 @@ const projectRoutes = require('./routes/projects');
 const taskRoutes = require('./routes/tasks');
 const workLogRoutes = require('./routes/worklogs');
 const reportRoutes = require('./routes/reports');
+const notificationRoutes = require('./routes/notifications');
 
 const { startCronJobs } = require('./cron/index');
 
@@ -25,6 +26,7 @@ app.use('/api/projects', projectRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/worklogs', workLogRoutes);
 app.use('/api/reports', reportRoutes);
+app.use('/api/notifications', notificationRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ code: 200, message: '系统运行正常', data: { timestamp: new Date().toISOString() } });

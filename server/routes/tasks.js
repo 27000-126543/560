@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
-const { successResponse, errorResponse, validateWorkHours } = require('../utils/helpers');
+const { successResponse, errorResponse, validateWorkHours, addActivity, addNotification } = require('../utils/helpers');
 const { authMiddleware, roleMiddleware } = require('../middleware/auth');
 const { taskValidation } = require('../middleware/validation');
 
@@ -187,14 +187,22 @@ router.get('/:id', async (req, res) => {
     let logSql = `SELECT wl.*, u.real_name as user_name 
                   FROM work_logs wl 
                   LEFT JOIN users u ON wl.user_id = u.id 
-                  WHERE wl.task_id = ? 
-                  ORDER BY wl.work_date DESC, wl.created_at DESC`;
+                  WHERE wl.task_id = ?`;
     const logParams = [taskId];
 
     if (userRole === 'member') {
       logSql += ' AND wl.user_id = ?';
       logParams.push(userId);
+    } else if (userRole === 'manager') {
+      logSql += ` AND EXISTS (
+        SELECT 1 FROM tasks t 
+        LEFT JOIN projects p ON t.project_id = p.id 
+        WHERE t.id = wl.task_id AND p.manager_id = ?
+      )`;
+      logParams.push(userId);
     }
+    
+    logSql += ' ORDER BY wl.work_date DESC, wl.created_at DESC';
 
     const [workLogs] = await pool.execute(logSql, logParams);
 
@@ -218,7 +226,24 @@ router.post('/', roleMiddleware('admin', 'manager'), taskValidation, async (req,
       [name, description, project_id, creatorId, assignee_id, priority, deadline, estimated_hours || null]
     );
 
-    successResponse(res, { id: result.insertId }, '任务创建成功');
+    const taskId = result.insertId;
+    const userId = creatorId;
+    
+    try {
+      addActivity(taskId, userId, 'create', '创建了任务', { task_name: name });
+    } catch (e) {
+      console.error('记录创建活动失败:', e);
+    }
+    
+    if (assignee_id && assignee_id !== userId) {
+      try {
+        addNotification(assignee_id, 'task_assign', '新任务分配', `您被分配了新任务：${name}`, taskId, 'task');
+      } catch (e) {
+        console.error('发送分配通知失败:', e);
+      }
+    }
+
+    successResponse(res, { id: taskId }, '任务创建成功');
   } catch (err) {
     console.error('创建任务错误:', err);
     errorResponse(res, '创建任务失败', 500);
@@ -302,6 +327,19 @@ router.put('/:id/status', async (req, res) => {
       [status, status === 'completed' ? new Date() : null, taskId]
     );
 
+    const oldStatus = task.status;
+    const statusTextMap = {
+      pending: '待处理',
+      in_progress: '进行中',
+      completed: '已完成',
+      rejected: '已驳回'
+    };
+    
+    addActivity(taskId, userId, 'update_status', 
+      `将状态从「${statusTextMap[oldStatus] || oldStatus}」改为「${statusTextMap[status] || status}」`, 
+      { old_status: oldStatus, new_status: status }
+    );
+
     successResponse(res, null, '任务状态更新成功');
   } catch (err) {
     console.error('更新任务状态错误:', err);
@@ -313,25 +351,150 @@ router.post('/:id/reject', roleMiddleware('admin', 'manager'), async (req, res) 
   try {
     const taskId = req.params.id;
     const { reject_reason } = req.body;
+    const userId = req.user.id;
 
     if (!reject_reason || !reject_reason.trim()) {
       return errorResponse(res, '驳回原因不能为空');
     }
 
-    const [tasks] = await pool.execute('SELECT id FROM tasks WHERE id = ?', [taskId]);
+    const [tasks] = await pool.execute('SELECT * FROM tasks WHERE id = ?', [taskId]);
     if (tasks.length === 0) {
       return errorResponse(res, '任务不存在', 404);
     }
+    const task = tasks[0];
 
     await pool.execute(
       'UPDATE tasks SET status = ?, reject_reason = ? WHERE id = ?',
       ['rejected', reject_reason, taskId]
     );
+    
+    try {
+      addActivity(taskId, userId, 'update_status', `驳回了任务，原因：${reject_reason}`, { 
+        old_status: task.status, 
+        new_status: 'rejected',
+        reject_reason 
+      });
+    } catch (e) {
+      console.error('记录驳回活动失败:', e);
+    }
+    
+    if (task.assignee_id) {
+      try {
+        addNotification(task.assignee_id, 'task_reject', '任务被驳回', `任务「${task.name}」被驳回，原因：${reject_reason}`, taskId, 'task');
+      } catch (e) {
+        console.error('发送驳回通知失败:', e);
+      }
+    }
 
     successResponse(res, null, '任务已驳回');
   } catch (err) {
     console.error('驳回任务错误:', err);
     errorResponse(res, '驳回任务失败', 500);
+  }
+});
+
+router.get('/:id/activities', async (req, res) => {
+  try {
+    const taskId = req.params.id;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    const [tasks] = await pool.execute(`
+      SELECT t.*, p.manager_id 
+      FROM tasks t 
+      LEFT JOIN projects p ON t.project_id = p.id 
+      WHERE t.id = ?
+    `, [taskId]);
+    
+    if (tasks.length === 0) {
+      return errorResponse(res, '任务不存在', 404);
+    }
+    const task = tasks[0];
+
+    if (userRole === 'member' && task.assignee_id !== userId) {
+      return errorResponse(res, '无权查看此任务', 403);
+    }
+    if (userRole === 'manager' && task.manager_id !== userId) {
+      return errorResponse(res, '无权查看此任务', 403);
+    }
+
+    const [activities] = await pool.execute(`
+      SELECT 
+        a.*,
+        u.name as user_name,
+        u.avatar
+      FROM task_activities a
+      LEFT JOIN users u ON a.user_id = u.id
+      WHERE a.task_id = ?
+      ORDER BY a.created_at DESC
+    `, [taskId]);
+
+    successResponse(res, activities);
+  } catch (err) {
+    console.error('获取活动记录错误:', err);
+    errorResponse(res, '获取活动记录失败', 500);
+  }
+});
+
+router.post('/:id/comments', async (req, res) => {
+  try {
+    const taskId = req.params.id;
+    const { content, mentioned_user_ids = [] } = req.body;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    if (!content || !content.trim()) {
+      return errorResponse(res, '评论内容不能为空');
+    }
+
+    const [tasks] = await pool.execute(`
+      SELECT t.*, p.manager_id 
+      FROM tasks t 
+      LEFT JOIN projects p ON t.project_id = p.id 
+      WHERE t.id = ?
+    `, [taskId]);
+    
+    if (tasks.length === 0) {
+      return errorResponse(res, '任务不存在', 404);
+    }
+    const task = tasks[0];
+
+    if (userRole === 'member' && task.assignee_id !== userId) {
+      return errorResponse(res, '无权评论此任务', 403);
+    }
+    if (userRole === 'manager' && task.manager_id !== userId) {
+      return errorResponse(res, '无权评论此任务', 403);
+    }
+
+    const [result] = await pool.execute(
+      'INSERT INTO task_activities (task_id, user_id, type, content, extra_data) VALUES (?, ?, ?, ?, ?)',
+      [taskId, userId, 'comment', content, JSON.stringify({ mentioned_user_ids })]
+    );
+    
+    const activityId = result.insertId;
+    
+    if (mentioned_user_ids && mentioned_user_ids.length > 0) {
+      for (const mentionId of mentioned_user_ids) {
+        if (mentionId !== userId) {
+          addNotification(mentionId, 'mention', '有人@你', `在任务「${task.name}」中提到了你：${content.substring(0, 50)}`, taskId, 'task');
+        }
+      }
+    }
+
+    const [newActivity] = await pool.execute(`
+      SELECT 
+        a.*,
+        u.name as user_name,
+        u.avatar
+      FROM task_activities a
+      LEFT JOIN users u ON a.user_id = u.id
+      WHERE a.id = ?
+    `, [activityId]);
+
+    successResponse(res, newActivity[0], '评论发表成功');
+  } catch (err) {
+    console.error('发表评论错误:', err);
+    errorResponse(res, '发表评论失败', 500);
   }
 });
 

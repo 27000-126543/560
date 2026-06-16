@@ -61,3 +61,18 @@ export const rejectTaskApi = (id, rejectReason) => {
     data: { reject_reason: rejectReason }
   })
 }
+
+export const getTaskActivitiesApi = (id) => {
+  return request({
+    url: `/tasks/${id}/activities`,
+    method: 'get'
+  })
+}
+
+export const addTaskCommentApi = (id, data) => {
+  return request({
+    url: `/tasks/${id}/comments`,
+    method: 'post',
+    data
+  })
+}

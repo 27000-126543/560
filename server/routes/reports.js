@@ -284,6 +284,169 @@ router.get('/task-trend', async (req, res) => {
   }
 });
 
+router.get('/work-trend', roleMiddleware('admin', 'manager'), async (req, res) => {
+  try {
+    const { dimension = 'user', period = 'month', start_date = '', end_date = '' } = req.query;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    let dateFormat;
+    if (period === 'week') {
+      dateFormat = "CONCAT(YEAR(wl.work_date), '-W', LPAD(WEEK(wl.work_date, 1), 2, '0'))";
+    } else {
+      dateFormat = "DATE_FORMAT(wl.work_date, '%Y-%m')";
+    }
+
+    let nameField, joinCondition, idField;
+    if (dimension === 'project') {
+      nameField = 'p.name as item_name';
+      idField = 'p.id as item_id';
+      joinCondition = 'LEFT JOIN tasks t ON wl.task_id = t.id LEFT JOIN projects p ON t.project_id = p.id';
+    } else {
+      nameField = 'u.real_name as item_name';
+      idField = 'u.id as item_id';
+      joinCondition = 'LEFT JOIN users u ON wl.user_id = u.id LEFT JOIN tasks t ON wl.task_id = t.id LEFT JOIN projects p ON t.project_id = p.id';
+    }
+
+    let sql = `SELECT 
+                 ${dateFormat} as period,
+                 ${idField},
+                 ${nameField},
+                 COALESCE(SUM(wl.hours), 0) as total_hours
+               FROM work_logs wl
+               ${joinCondition}
+               WHERE wl.status != 'rejected'`;
+    const params = [];
+
+    if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    }
+
+    if (start_date) {
+      sql += ' AND wl.work_date >= ?';
+      params.push(start_date);
+    }
+    if (end_date) {
+      sql += ' AND wl.work_date <= ?';
+      params.push(end_date);
+    }
+
+    sql += ` GROUP BY period, item_id, item_name ORDER BY period ASC, total_hours DESC`;
+
+    const [rows] = await pool.execute(sql, params);
+
+    const periods = [...new Set(rows.map(r => r.period))].sort();
+    const itemMap = {};
+
+    rows.forEach(row => {
+      if (!itemMap[row.item_id]) {
+        itemMap[row.item_id] = {
+          id: row.item_id,
+          name: row.item_name,
+          data: {}
+        };
+      }
+      itemMap[row.item_id].data[row.period] = parseFloat(row.total_hours);
+    });
+
+    const series = Object.values(itemMap).slice(0, 10).map(item => ({
+      id: item.id,
+      name: item.name,
+      data: periods.map(p => item.data[p] || 0)
+    }));
+
+    successResponse(res, {
+      categories: periods,
+      series
+    });
+  } catch (err) {
+    console.error('获取工时趋势错误:', err);
+    errorResponse(res, '获取工时趋势失败', 500);
+  }
+});
+
+router.get('/over-budget', roleMiddleware('admin', 'manager'), async (req, res) => {
+  try {
+    const userId = req.user.id;
+    const userRole = req.user.role;
+    const { type = 'project' } = req.query;
+
+    if (type === 'project') {
+      let sql = `SELECT 
+                   p.id,
+                   p.name,
+                   u.real_name as manager_name,
+                   COALESCE(SUM(t.estimated_hours), 0) as estimated_hours,
+                   COALESCE(SUM(t.actual_hours), 0) as actual_hours,
+                   COUNT(t.id) as total_tasks,
+                   SUM(CASE WHEN t.actual_hours > t.estimated_hours AND t.estimated_hours > 0 THEN 1 ELSE 0 END) as over_budget_tasks
+                 FROM projects p
+                 LEFT JOIN tasks t ON p.id = t.project_id
+                 LEFT JOIN users u ON p.manager_id = u.id
+                 WHERE p.status = 'active'`;
+      const params = [];
+
+      if (userRole === 'manager') {
+        sql += ' AND p.manager_id = ?';
+        params.push(userId);
+      }
+
+      sql += ` GROUP BY p.id, p.name, u.real_name 
+               HAVING actual_hours > estimated_hours AND estimated_hours > 0
+               ORDER BY (actual_hours - estimated_hours) DESC`;
+
+      const [rows] = await pool.execute(sql, params);
+
+      const result = rows.map(r => ({
+        ...r,
+        estimated_hours: parseFloat(r.estimated_hours),
+        actual_hours: parseFloat(r.actual_hours),
+        over_hours: parseFloat((r.actual_hours - r.estimated_hours).toFixed(1)),
+        over_ratio: parseFloat(((r.actual_hours - r.estimated_hours) / r.estimated_hours * 100).toFixed(1))
+      }));
+
+      successResponse(res, result);
+    } else {
+      let sql = `SELECT 
+                   t.id,
+                   t.name,
+                   p.name as project_name,
+                   u.real_name as assignee_name,
+                   t.estimated_hours,
+                   t.actual_hours,
+                   t.status
+                 FROM tasks t
+                 LEFT JOIN projects p ON t.project_id = p.id
+                 LEFT JOIN users u ON t.assignee_id = u.id
+                 WHERE t.estimated_hours > 0 AND t.actual_hours > t.estimated_hours`;
+      const params = [];
+
+      if (userRole === 'manager') {
+        sql += ' AND p.manager_id = ?';
+        params.push(userId);
+      }
+
+      sql += ` ORDER BY (t.actual_hours - t.estimated_hours) DESC LIMIT 20`;
+
+      const [rows] = await pool.execute(sql, params);
+
+      const result = rows.map(r => ({
+        ...r,
+        estimated_hours: parseFloat(r.estimated_hours),
+        actual_hours: parseFloat(r.actual_hours),
+        over_hours: parseFloat((r.actual_hours - r.estimated_hours).toFixed(1)),
+        over_ratio: parseFloat(((r.actual_hours - r.estimated_hours) / r.estimated_hours * 100).toFixed(1))
+      }));
+
+      successResponse(res, result);
+    }
+  } catch (err) {
+    console.error('获取超支项目错误:', err);
+    errorResponse(res, '获取超支数据失败', 500);
+  }
+});
+
 router.get('/export/work-logs', roleMiddleware('admin', 'manager'), async (req, res) => {
   try {
     const { start_date, end_date, user_id, project_id, status } = req.query;

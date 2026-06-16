@@ -27,6 +27,12 @@ const routes = [
         meta: { title: '个人中心', icon: 'User', hidden: true }
       },
       {
+        path: 'notifications',
+        name: 'Notifications',
+        component: () => import('@/views/notification/NotificationCenter.vue'),
+        meta: { title: '通知中心', icon: 'Bell', hidden: true }
+      },
+      {
         path: 'users',
         name: 'Users',
         component: () => import('@/views/admin/Users.vue'),

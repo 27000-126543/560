@@ -118,6 +118,19 @@ const createTables = async () => {
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
 
+    `CREATE TABLE IF NOT EXISTS task_activities (
+      id INT PRIMARY KEY AUTO_INCREMENT,
+      task_id INT NOT NULL,
+      user_id INT NOT NULL,
+      type VARCHAR(30) NOT NULL COMMENT 'comment,create,update_status,assign,worklog_submit,worklog_approve,worklog_reject',
+      content TEXT,
+      extra_data JSON,
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (task_id) REFERENCES tasks(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+      INDEX idx_task_id (task_id)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+
     `CREATE TABLE IF NOT EXISTS system_settings (
       id INT PRIMARY KEY AUTO_INCREMENT,
       setting_key VARCHAR(100) NOT NULL UNIQUE,

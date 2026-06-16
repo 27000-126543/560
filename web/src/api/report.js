@@ -30,6 +30,22 @@ export const getTaskTrendApi = (params) => {
   })
 }
 
+export const getWorkTrendApi = (params) => {
+  return request({
+    url: '/reports/work-trend',
+    method: 'get',
+    params
+  })
+}
+
+export const getOverBudgetApi = (params) => {
+  return request({
+    url: '/reports/over-budget',
+    method: 'get',
+    params
+  })
+}
+
 const downloadBlob = (blob, filename) => {
   const url = window.URL.createObjectURL(new Blob([blob]))
   const link = document.createElement('a')
