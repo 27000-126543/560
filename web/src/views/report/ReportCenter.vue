@@ -283,14 +283,18 @@ const renderProjectPieChart = () => {
   projectPieChart.setOption(option)
 }
 
-const exportUserHours = () => {
+const exportUserHours = async () => {
   const params = {}
   if (dateRange.value && dateRange.value.length === 2) {
     params.start_date = dateRange.value[0]
     params.end_date = dateRange.value[1]
   }
-  exportUserHoursApi(params)
-  ElMessage.success('正在导出，请稍候...')
+  try {
+    await exportUserHoursApi(params)
+    ElMessage.success('导出成功')
+  } catch (err) {
+    console.error('导出失败:', err)
+  }
 }
 
 onMounted(() => {

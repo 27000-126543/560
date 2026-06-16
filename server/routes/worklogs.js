@@ -35,8 +35,8 @@ router.get('/', async (req, res) => {
       sql += ' AND wl.user_id = ?';
       params.push(userId);
     } else if (userRole === 'manager') {
-      sql += ` AND (wl.user_id = ? OR p.manager_id = ? OR t.creator_id = ?)`;
-      params.push(userId, userId, userId);
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
     }
 
     if (user_id) {
@@ -80,8 +80,8 @@ router.get('/', async (req, res) => {
       countSql += ' AND wl.user_id = ?';
       countParams.push(userId);
     } else if (userRole === 'manager') {
-      countSql += ` AND (wl.user_id = ? OR p.manager_id = ? OR t.creator_id = ?)`;
-      countParams.push(userId, userId, userId);
+      countSql += ' AND p.manager_id = ?';
+      countParams.push(userId);
     }
 
     if (user_id) {
@@ -160,18 +160,30 @@ router.get('/my-logs', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const [workLogs] = await pool.execute(
-      `SELECT wl.*, t.name as task_name, p.name as project_name, u.real_name as user_name 
-       FROM work_logs wl 
-       LEFT JOIN tasks t ON wl.task_id = t.id 
-       LEFT JOIN projects p ON t.project_id = p.id 
-       LEFT JOIN users u ON wl.user_id = u.id 
-       WHERE wl.id = ?`,
-      [req.params.id]
-    );
+    const userId = req.user.id;
+    const userRole = req.user.role;
+    const logId = req.params.id;
+
+    let sql = `SELECT wl.*, t.name as task_name, p.name as project_name, u.real_name as user_name 
+               FROM work_logs wl 
+               LEFT JOIN tasks t ON wl.task_id = t.id 
+               LEFT JOIN projects p ON t.project_id = p.id 
+               LEFT JOIN users u ON wl.user_id = u.id 
+               WHERE wl.id = ?`;
+    const params = [logId];
+
+    if (userRole === 'member') {
+      sql += ' AND wl.user_id = ?';
+      params.push(userId);
+    } else if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    }
+
+    const [workLogs] = await pool.execute(sql, params);
 
     if (workLogs.length === 0) {
-      return errorResponse(res, '工时记录不存在', 404);
+      return errorResponse(res, '工时记录不存在或无权访问', 404);
     }
 
     successResponse(res, workLogs[0]);
@@ -245,9 +257,17 @@ router.put('/:id', async (req, res) => {
       return errorResponse(res, '无权修改此工时记录', 403);
     }
 
+    if (userRole === 'member' && log.status === 'submitted') {
+      return errorResponse(res, '已提交待审核的工时记录不能修改，请等待审核或被驳回后再修改', 403);
+    }
+
     if (log.status === 'approved') {
       return errorResponse(res, '已审核通过的工时记录不能修改');
     }
+
+    const oldHours = parseFloat(log.hours);
+    const wasCounted = log.status === 'submitted' || log.status === 'approved';
+    const wasRejected = log.status === 'rejected';
 
     if (hours !== undefined) {
       const validation = validateWorkHours(parseFloat(hours));
@@ -257,8 +277,8 @@ router.put('/:id', async (req, res) => {
 
       const checkDate = work_date || log.work_date;
       const [dayLogs] = await pool.execute(
-        'SELECT COALESCE(SUM(hours), 0) as total_hours FROM work_logs WHERE user_id = ? AND work_date = ? AND id != ?',
-        [log.user_id, checkDate, logId]
+        'SELECT COALESCE(SUM(hours), 0) as total_hours FROM work_logs WHERE user_id = ? AND work_date = ? AND id != ? AND status != ?',
+        [log.user_id, checkDate, logId, 'rejected']
       );
 
       const totalHoursForDay = parseFloat(dayLogs[0].total_hours) + parseFloat(hours);
@@ -266,19 +286,42 @@ router.put('/:id', async (req, res) => {
         return errorResponse(res, '当日总工时不能超过24小时');
       }
 
-      const hoursDiff = parseFloat(hours) - parseFloat(log.hours);
+      if (wasCounted) {
+        const hoursDiff = parseFloat(hours) - oldHours;
+        await pool.execute(
+          'UPDATE tasks SET actual_hours = GREATEST(0, COALESCE(actual_hours, 0) + ?) WHERE id = ?',
+          [hoursDiff, log.task_id]
+        );
+      } else {
+        await pool.execute(
+          'UPDATE tasks SET actual_hours = COALESCE(actual_hours, 0) + ? WHERE id = ?',
+          [parseFloat(hours), log.task_id]
+        );
+      }
+    } else if (wasRejected) {
+      const checkDate = work_date || log.work_date;
+      const [dayLogs] = await pool.execute(
+        'SELECT COALESCE(SUM(hours), 0) as total_hours FROM work_logs WHERE user_id = ? AND work_date = ? AND id != ? AND status != ?',
+        [log.user_id, checkDate, logId, 'rejected']
+      );
+
+      const totalHoursForDay = parseFloat(dayLogs[0].total_hours) + oldHours;
+      if (totalHoursForDay > 24) {
+        return errorResponse(res, '当日总工时不能超过24小时');
+      }
+
       await pool.execute(
         'UPDATE tasks SET actual_hours = COALESCE(actual_hours, 0) + ? WHERE id = ?',
-        [hoursDiff, log.task_id]
+        [oldHours, log.task_id]
       );
     }
 
     await pool.execute(
-      'UPDATE work_logs SET work_date = ?, hours = ?, log_content = ?, status = ? WHERE id = ?',
+      'UPDATE work_logs SET work_date = ?, hours = ?, log_content = ?, status = ?, reject_reason = NULL WHERE id = ?',
       [
         work_date || log.work_date,
-        hours || log.hours,
-        log_content || log.log_content,
+        hours !== undefined ? hours : log.hours,
+        log_content !== undefined ? log_content : log.log_content,
         'submitted',
         logId
       ]
@@ -308,14 +351,20 @@ router.delete('/:id', async (req, res) => {
       return errorResponse(res, '无权删除此工时记录', 403);
     }
 
+    if (userRole === 'member' && log.status === 'submitted') {
+      return errorResponse(res, '已提交待审核的工时记录不能删除，请等待审核或被驳回后再操作', 403);
+    }
+
     if (log.status === 'approved') {
       return errorResponse(res, '已审核通过的工时记录不能删除');
     }
 
-    await pool.execute(
-      'UPDATE tasks SET actual_hours = GREATEST(0, COALESCE(actual_hours, 0) - ?) WHERE id = ?',
-      [log.hours, log.task_id]
-    );
+    if (log.status === 'submitted') {
+      await pool.execute(
+        'UPDATE tasks SET actual_hours = GREATEST(0, COALESCE(actual_hours, 0) - ?) WHERE id = ?',
+        [log.hours, log.task_id]
+      );
+    }
 
     await pool.execute('DELETE FROM work_logs WHERE id = ?', [logId]);
 
@@ -329,10 +378,28 @@ router.delete('/:id', async (req, res) => {
 router.post('/:id/approve', roleMiddleware('admin', 'manager'), async (req, res) => {
   try {
     const logId = req.params.id;
+    const userId = req.user.id;
+    const userRole = req.user.role;
 
-    const [workLogs] = await pool.execute('SELECT id FROM work_logs WHERE id = ?', [logId]);
+    let sql = `SELECT wl.id, wl.status 
+               FROM work_logs wl 
+               LEFT JOIN tasks t ON wl.task_id = t.id 
+               LEFT JOIN projects p ON t.project_id = p.id 
+               WHERE wl.id = ?`;
+    const params = [logId];
+
+    if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    }
+
+    const [workLogs] = await pool.execute(sql, params);
     if (workLogs.length === 0) {
-      return errorResponse(res, '工时记录不存在', 404);
+      return errorResponse(res, '工时记录不存在或无权审核', 403);
+    }
+
+    if (workLogs[0].status !== 'submitted') {
+      return errorResponse(res, '该工时记录状态不是待审核，无法通过');
     }
 
     await pool.execute(
@@ -351,10 +418,28 @@ router.post('/:id/reject', roleMiddleware('admin', 'manager'), rejectValidation,
   try {
     const logId = req.params.id;
     const { reject_reason } = req.body;
+    const userId = req.user.id;
+    const userRole = req.user.role;
 
-    const [workLogs] = await pool.execute('SELECT * FROM work_logs WHERE id = ?', [logId]);
+    let sql = `SELECT wl.* 
+               FROM work_logs wl 
+               LEFT JOIN tasks t ON wl.task_id = t.id 
+               LEFT JOIN projects p ON t.project_id = p.id 
+               WHERE wl.id = ?`;
+    const params = [logId];
+
+    if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    }
+
+    const [workLogs] = await pool.execute(sql, params);
     if (workLogs.length === 0) {
-      return errorResponse(res, '工时记录不存在', 404);
+      return errorResponse(res, '工时记录不存在或无权审核', 403);
+    }
+
+    if (workLogs[0].status !== 'submitted') {
+      return errorResponse(res, '该工时记录状态不是待审核，无法驳回');
     }
 
     const log = workLogs[0];
@@ -364,10 +449,12 @@ router.post('/:id/reject', roleMiddleware('admin', 'manager'), rejectValidation,
       ['rejected', reject_reason, logId]
     );
 
-    await pool.execute(
-      'UPDATE tasks SET actual_hours = GREATEST(0, COALESCE(actual_hours, 0) - ?) WHERE id = ?',
-      [log.hours, log.task_id]
-    );
+    if (log.status === 'submitted') {
+      await pool.execute(
+        'UPDATE tasks SET actual_hours = GREATEST(0, COALESCE(actual_hours, 0) - ?) WHERE id = ?',
+        [log.hours, log.task_id]
+      );
+    }
 
     successResponse(res, null, '工时记录已驳回');
   } catch (err) {

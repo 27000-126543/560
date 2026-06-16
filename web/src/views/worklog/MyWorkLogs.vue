@@ -100,7 +100,7 @@
               详情
             </el-button>
             <el-button
-              v-if="row.status !== 'approved'"
+              v-if="row.status === 'rejected'"
               type="warning"
               link
               size="small"
@@ -109,7 +109,7 @@
               编辑
             </el-button>
             <el-button
-              v-if="row.status !== 'approved'"
+              v-if="row.status === 'rejected'"
               type="danger"
               link
               size="small"

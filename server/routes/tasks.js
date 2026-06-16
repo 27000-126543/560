@@ -155,31 +155,48 @@ router.get('/my-tasks', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const [tasks] = await pool.execute(
-      `SELECT t.*, p.name as project_name, u.real_name as assignee_name, u.email as assignee_email, 
-              c.real_name as creator_name 
-       FROM tasks t 
-       LEFT JOIN projects p ON t.project_id = p.id 
-       LEFT JOIN users u ON t.assignee_id = u.id 
-       LEFT JOIN users c ON t.creator_id = c.id 
-       WHERE t.id = ?`,
-      [req.params.id]
-    );
+    const userId = req.user.id;
+    const userRole = req.user.role;
+    const taskId = req.params.id;
+
+    let sql = `SELECT t.*, p.name as project_name, u.real_name as assignee_name, u.email as assignee_email, 
+                      c.real_name as creator_name 
+               FROM tasks t 
+               LEFT JOIN projects p ON t.project_id = p.id 
+               LEFT JOIN users u ON t.assignee_id = u.id 
+               LEFT JOIN users c ON t.creator_id = c.id 
+               WHERE t.id = ?`;
+    const params = [taskId];
+
+    if (userRole === 'manager') {
+      sql += ' AND (t.creator_id = ? OR p.manager_id = ?)';
+      params.push(userId, userId);
+    } else if (userRole === 'member') {
+      sql += ' AND t.assignee_id = ?';
+      params.push(userId);
+    }
+
+    const [tasks] = await pool.execute(sql, params);
 
     if (tasks.length === 0) {
-      return errorResponse(res, '任务不存在', 404);
+      return errorResponse(res, '任务不存在或无权访问', 404);
     }
 
     const task = tasks[0];
 
-    const [workLogs] = await pool.execute(
-      `SELECT wl.*, u.real_name as user_name 
-       FROM work_logs wl 
-       LEFT JOIN users u ON wl.user_id = u.id 
-       WHERE wl.task_id = ? 
-       ORDER BY wl.work_date DESC, wl.created_at DESC`,
-      [task.id]
-    );
+    let logSql = `SELECT wl.*, u.real_name as user_name 
+                  FROM work_logs wl 
+                  LEFT JOIN users u ON wl.user_id = u.id 
+                  WHERE wl.task_id = ? 
+                  ORDER BY wl.work_date DESC, wl.created_at DESC`;
+    const logParams = [taskId];
+
+    if (userRole === 'member') {
+      logSql += ' AND wl.user_id = ?';
+      logParams.push(userId);
+    }
+
+    const [workLogs] = await pool.execute(logSql, logParams);
 
     task.work_logs = workLogs;
 

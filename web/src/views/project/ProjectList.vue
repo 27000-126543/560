@@ -182,6 +182,7 @@ import { Plus, Search, Refresh } from '@element-plus/icons-vue'
 import { useUserStore } from '@/stores/user'
 import {
   getProjectListApi,
+  getProjectDetailApi,
   createProjectApi,
   updateProjectApi,
   deleteProjectApi
@@ -303,18 +304,33 @@ const handleAdd = () => {
   dialogVisible.value = true
 }
 
-const handleEdit = (row) => {
+const handleEdit = async (row) => {
   isEdit.value = true
-  Object.assign(formData, {
-    id: row.id,
-    name: row.name,
-    description: row.description || '',
-    manager_id: row.manager_id,
-    members: [],
-    status: row.status,
-    start_date: row.start_date,
-    end_date: row.end_date
-  })
+  try {
+    const detail = await getProjectDetailApi(row.id)
+    Object.assign(formData, {
+      id: detail.id,
+      name: detail.name,
+      description: detail.description || '',
+      manager_id: detail.manager_id,
+      members: (detail.members || []).map(m => m.id),
+      status: detail.status,
+      start_date: detail.start_date,
+      end_date: detail.end_date
+    })
+  } catch (err) {
+    console.error('加载项目详情失败:', err)
+    Object.assign(formData, {
+      id: row.id,
+      name: row.name,
+      description: row.description || '',
+      manager_id: row.manager_id,
+      members: [],
+      status: row.status,
+      start_date: row.start_date,
+      end_date: row.end_date
+    })
+  }
   dialogVisible.value = true
 }
 

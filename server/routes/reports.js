@@ -139,6 +139,8 @@ router.get('/dashboard', async (req, res) => {
 router.get('/user-work-hours', roleMiddleware('admin', 'manager'), async (req, res) => {
   try {
     const { start_date, end_date, department = '' } = req.query;
+    const userId = req.user.id;
+    const userRole = req.user.role;
 
     let sql = `SELECT 
                  u.id,
@@ -152,8 +154,15 @@ router.get('/user-work-hours', roleMiddleware('admin', 'manager'), async (req, r
                FROM users u
                LEFT JOIN work_logs wl ON u.id = wl.user_id
                LEFT JOIN roles r ON u.role_id = r.id
+               LEFT JOIN tasks t ON wl.task_id = t.id
+               LEFT JOIN projects p ON t.project_id = p.id
                WHERE r.name = 'member'`;
     const params = [];
+
+    if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    }
 
     if (start_date) {
       sql += ' AND wl.work_date >= ?';
@@ -180,23 +189,33 @@ router.get('/user-work-hours', roleMiddleware('admin', 'manager'), async (req, r
 
 router.get('/project-progress', roleMiddleware('admin', 'manager'), async (req, res) => {
   try {
-    const [projects] = await pool.execute(
-      `SELECT 
-         p.id,
-         p.name,
-         p.status,
-         p.manager_id,
-         u.real_name as manager_name,
-         COUNT(t.id) as total_tasks,
-         SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
-         COALESCE(SUM(t.estimated_hours), 0) as estimated_hours,
-         COALESCE(SUM(t.actual_hours), 0) as actual_hours
-       FROM projects p
-       LEFT JOIN tasks t ON p.id = t.project_id
-       LEFT JOIN users u ON p.manager_id = u.id
-       GROUP BY p.id, p.name, p.status, p.manager_id, u.real_name
-       ORDER BY p.id DESC`
-    );
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    let sql = `SELECT 
+                 p.id,
+                 p.name,
+                 p.status,
+                 p.manager_id,
+                 u.real_name as manager_name,
+                 COUNT(t.id) as total_tasks,
+                 SUM(CASE WHEN t.status = 'completed' THEN 1 ELSE 0 END) as completed_tasks,
+                 COALESCE(SUM(t.estimated_hours), 0) as estimated_hours,
+                 COALESCE(SUM(t.actual_hours), 0) as actual_hours
+               FROM projects p
+               LEFT JOIN tasks t ON p.id = t.project_id
+               LEFT JOIN users u ON p.manager_id = u.id
+               WHERE 1=1`;
+    const params = [];
+
+    if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    }
+
+    sql += ' GROUP BY p.id, p.name, p.status, p.manager_id, u.real_name ORDER BY p.id DESC';
+
+    const [projects] = await pool.execute(sql, params);
 
     const result = projects.map(p => ({
       ...p,
@@ -268,6 +287,8 @@ router.get('/task-trend', async (req, res) => {
 router.get('/export/work-logs', roleMiddleware('admin', 'manager'), async (req, res) => {
   try {
     const { start_date, end_date, user_id, project_id, status } = req.query;
+    const userId = req.user.id;
+    const userRole = req.user.role;
 
     let sql = `SELECT 
                  wl.id,
@@ -286,6 +307,11 @@ router.get('/export/work-logs', roleMiddleware('admin', 'manager'), async (req, 
                LEFT JOIN users u ON wl.user_id = u.id
                WHERE 1=1`;
     const params = [];
+
+    if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    }
 
     if (start_date) {
       sql += ' AND wl.work_date >= ?';
@@ -365,6 +391,8 @@ router.get('/export/work-logs', roleMiddleware('admin', 'manager'), async (req, 
 router.get('/export/user-hours', roleMiddleware('admin', 'manager'), async (req, res) => {
   try {
     const { start_date, end_date, department } = req.query;
+    const userId = req.user.id;
+    const userRole = req.user.role;
 
     let sql = `SELECT 
                  u.id,
@@ -377,8 +405,15 @@ router.get('/export/user-hours', roleMiddleware('admin', 'manager'), async (req,
                FROM users u
                LEFT JOIN work_logs wl ON u.id = wl.user_id
                LEFT JOIN roles r ON u.role_id = r.id
+               LEFT JOIN tasks t ON wl.task_id = t.id
+               LEFT JOIN projects p ON t.project_id = p.id
                WHERE r.name = 'member'`;
     const params = [];
+
+    if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    }
 
     if (start_date) {
       sql += ' AND wl.work_date >= ?';

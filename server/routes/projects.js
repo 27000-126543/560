@@ -121,16 +121,28 @@ router.get('/all', async (req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const [projects] = await pool.execute(
-      `SELECT p.*, u.real_name as manager_name, u.email as manager_email, u.department 
-       FROM projects p 
-       LEFT JOIN users u ON p.manager_id = u.id 
-       WHERE p.id = ?`,
-      [req.params.id]
-    );
+    const userId = req.user.id;
+    const userRole = req.user.role;
+    const projectId = req.params.id;
+
+    let sql = `SELECT p.*, u.real_name as manager_name, u.email as manager_email, u.department 
+               FROM projects p 
+               LEFT JOIN users u ON p.manager_id = u.id 
+               WHERE p.id = ?`;
+    const params = [projectId];
+
+    if (userRole === 'manager') {
+      sql += ' AND p.manager_id = ?';
+      params.push(userId);
+    } else if (userRole === 'member') {
+      sql += ` AND (p.manager_id = ? OR p.id IN (SELECT project_id FROM project_members WHERE user_id = ?))`;
+      params.push(userId, userId);
+    }
+
+    const [projects] = await pool.execute(sql, params);
 
     if (projects.length === 0) {
-      return errorResponse(res, '项目不存在', 404);
+      return errorResponse(res, '项目不存在或无权访问', 404);
     }
 
     const project = projects[0];
@@ -277,6 +289,24 @@ router.get('/:id/tasks', async (req, res) => {
   try {
     const projectId = req.params.id;
     const { status = '' } = req.query;
+    const userId = req.user.id;
+    const userRole = req.user.role;
+
+    let projSql = 'SELECT id FROM projects WHERE id = ?';
+    const projParams = [projectId];
+
+    if (userRole === 'manager') {
+      projSql += ' AND manager_id = ?';
+      projParams.push(userId);
+    } else if (userRole === 'member') {
+      projSql += ` AND (manager_id = ? OR id IN (SELECT project_id FROM project_members WHERE user_id = ?))`;
+      projParams.push(userId, userId);
+    }
+
+    const [projResult] = await pool.execute(projSql, projParams);
+    if (projResult.length === 0) {
+      return errorResponse(res, '项目不存在或无权访问', 404);
+    }
 
     let sql = `SELECT t.*, u.real_name as assignee_name, c.real_name as creator_name 
                FROM tasks t 
@@ -284,6 +314,11 @@ router.get('/:id/tasks', async (req, res) => {
                LEFT JOIN users c ON t.creator_id = c.id 
                WHERE t.project_id = ?`;
     const params = [projectId];
+
+    if (userRole === 'member') {
+      sql += ' AND t.assignee_id = ?';
+      params.push(userId);
+    }
 
     if (status) {
       sql += ' AND t.status = ?';

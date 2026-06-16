@@ -82,7 +82,21 @@ router.get('/profile', authMiddleware, async (req, res) => {
     const user = users[0];
     delete user.password;
 
-    successResponse(res, user);
+    const userInfo = {
+      id: user.id,
+      username: user.username,
+      real_name: user.real_name,
+      email: user.email,
+      phone: user.phone,
+      department: user.department,
+      role_id: user.role_id,
+      role: user.role_name,
+      role_desc: user.role_desc,
+      avatar: user.avatar,
+      status: user.status
+    };
+
+    successResponse(res, userInfo);
   } catch (err) {
     console.error('获取用户信息错误:', err);
     errorResponse(res, '获取用户信息失败', 500);
@@ -91,16 +105,16 @@ router.get('/profile', authMiddleware, async (req, res) => {
 
 router.put('/profile', authMiddleware, async (req, res) => {
   try {
-    const { real_name, email, phone, avatar } = req.body;
+    const { real_name, email, phone, avatar, department } = req.body;
     const userId = req.user.id;
 
     await pool.execute(
-      'UPDATE users SET real_name = ?, email = ?, phone = ?, avatar = ? WHERE id = ?',
-      [real_name, email, phone, avatar, userId]
+      'UPDATE users SET real_name = ?, email = ?, phone = ?, avatar = ?, department = ? WHERE id = ?',
+      [real_name, email, phone, avatar, department, userId]
     );
 
     const [users] = await pool.execute(
-      `SELECT u.*, r.name as role_name 
+      `SELECT u.*, r.name as role_name, r.description as role_desc 
        FROM users u 
        LEFT JOIN roles r ON u.role_id = r.id 
        WHERE u.id = ?`,
@@ -110,7 +124,21 @@ router.put('/profile', authMiddleware, async (req, res) => {
     const user = users[0];
     delete user.password;
 
-    successResponse(res, user, '个人信息更新成功');
+    const userInfo = {
+      id: user.id,
+      username: user.username,
+      real_name: user.real_name,
+      email: user.email,
+      phone: user.phone,
+      department: user.department,
+      role_id: user.role_id,
+      role: user.role_name,
+      role_desc: user.role_desc,
+      avatar: user.avatar,
+      status: user.status
+    };
+
+    successResponse(res, userInfo, '个人信息更新成功');
   } catch (err) {
     console.error('更新用户信息错误:', err);
     errorResponse(res, '更新个人信息失败', 500);

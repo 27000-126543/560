@@ -30,10 +30,35 @@ export const getTaskTrendApi = (params) => {
   })
 }
 
+const downloadBlob = (blob, filename) => {
+  const url = window.URL.createObjectURL(new Blob([blob]))
+  const link = document.createElement('a')
+  link.href = url
+  link.setAttribute('download', filename)
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  window.URL.revokeObjectURL(url)
+}
+
 export const exportWorkLogsApi = (params) => {
-  window.open(`/api/reports/export/work-logs?${new URLSearchParams(params).toString()}`, '_blank')
+  return request({
+    url: '/reports/export/work-logs',
+    method: 'get',
+    params,
+    responseType: 'blob'
+  }).then(res => {
+    downloadBlob(res, 'work_logs.xlsx')
+  })
 }
 
 export const exportUserHoursApi = (params) => {
-  window.open(`/api/reports/export/user-hours?${new URLSearchParams(params).toString()}`, '_blank')
+  return request({
+    url: '/reports/export/user-hours',
+    method: 'get',
+    params,
+    responseType: 'blob'
+  }).then(res => {
+    downloadBlob(res, 'user_hours_report.xlsx')
+  })
 }

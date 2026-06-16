@@ -338,7 +338,7 @@ const handleConfirmReject = async () => {
   }
 }
 
-const handleExport = () => {
+const handleExport = async () => {
   const params = {}
   
   if (searchForm.user_id) params.user_id = searchForm.user_id
@@ -349,8 +349,12 @@ const handleExport = () => {
     params.end_date = dateRange.value[1]
   }
   
-  exportWorkLogsApi(params)
-  ElMessage.success('正在导出，请稍候...')
+  try {
+    await exportWorkLogsApi(params)
+    ElMessage.success('导出成功')
+  } catch (err) {
+    console.error('导出失败:', err)
+  }
 }
 
 onMounted(() => {
